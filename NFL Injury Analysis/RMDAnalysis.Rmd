@@ -1,0 +1,440 @@
+---
+title: "RMDAnalysis"
+author: "Patrick Seng"
+date: "12/20/2019"
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '3'
+  html_document:
+    toc: yes
+    toc_depth: 3
+---
+
+## Data Cleaning & Preparation
+
+```{r,  message= FALSE, warning= FALSE, cache=TRUE}
+# Load Dependencies
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(corrplot)
+library(stringr)
+```
+
+```{r,  message= FALSE, cache=TRUE}
+# Load Data
+setwd("~/MSBA/02 - Projects/NFL First & Future Analytics")
+injury <- read.csv("InjuryRecord.csv")
+  colnames(injury)[1] <- "PlayerKey"
+player <- read.csv("PlayerTrackData.csv")
+play <- read.csv("PlayList.csv")
+
+```
+
+#### Risk Factor Data Cleaning
+
+###### The playList.csv dataset ("play") contains features that will serve as risk factors for player injuries. Within this data set there are various features that are redundant, unclear or erronous. Of the features that will be retained, Temperature, Weather and PlayType were identified as these columns that require cleaning for further analysis.   
+
+```{r}
+# Take the data we'll need (drop Position and PositionGroup, RosterPosition will do)
+playClean <- subset(play, select = -c(Position, PositionGroup))
+```
+
+#### Temperature
+``` {r}
+# We see the -999s are all from indoor stadiums
+playClean %>% filter(play$Temperature == -999) %>%
+  count(StadiumType)
+
+# Replace these temps using the average from indoor/indoors
+playClean$Temperature <- ifelse(playClean$Temperature == -999, 
+                        mean(playClean$Temperature[(playClean$StadiumType == "Indoor" | playClean$StadiumType == "Indoors") & 
+                                                       (play$Temperature != -999) & 
+                                                       (!is.na(play$Weather))]), playClean$Temperature)
+```
+
+#### Weather
+``` {r}
+# Define function to parse the weather data
+weather_update <- function(input_col) {
+  if (grepl("Rain", input_col, ignore.case = TRUE) | grepl("Snow", input_col, ignore.case = TRUE) | 
+      grepl("Shower", input_col, ignore.case = TRUE))
+    output_value = "PossibleRainSnow"
+  else if (grepl("Clear", input_col, ignore.case = TRUE) | grepl("Sun", input_col, ignore.case = TRUE) | 
+           grepl("Cloud", input_col, ignore.case = TRUE) | grepl("Coudy", input_col, ignore.case = TRUE) |
+           grepl("Indoor", input_col, ignore.case = TRUE) | grepl("Controlled", input_col, ignore.case = TRUE) | 
+           grepl("Cold", input_col, ignore.case = TRUE) | grepl("Fair", input_col, ignore.case = TRUE) | input_col == "")
+    output_value = "LikelyNoRain"
+  else
+    output_value = "Other"
+  return(output_value)
+}
+
+# Update weather using UDF
+playClean$Weather <- sapply(playClean$Weather, weather_update) 
+
+# Check new Weather values
+playClean %>% group_by(Weather) %>% count()
+```
+
+#### PlayType
+``` {r}
+# Combine various types of Kickoff and Punt 
+playClean$PlayType = ifelse(playClean$PlayType == "" | playClean$PlayType == 0, "Not Listed", 
+                            as.character(playClean$PlayType))
+
+playClean$PlayType = ifelse(grepl("kickoff", playClean$PlayType, ignore.case = TRUE), "Kickoff", 
+                            as.character(playClean$PlayType))
+
+playClean$PlayType = ifelse(grepl("punt", playClean$PlayType, ignore.case = TRUE), "Punt", 
+                            as.character(playClean$PlayType))
+
+# PlayType Values
+playClean %>% group_by(PlayType) %>% count()
+```
+
+
+
+
+
+
+
+
+
+
+\newpage
+## Risk Factor Analysis
+
+###### Exploring Risk Factors independent of Player Movement helps provide a high level understanding of the plays and games in which injuries occurred. After gaining basic graphical and statistical understandings of these risk factors, we are better prepared to explore their significance in conjuntion with player movement metrics.
+ 
+### Data Manipulation
+
+``` {r, message= FALSE, warning = FALSE}
+# Data prep for features dependent on play 
+injuryPlay_play <- injury %>% filter(PlayKey != "") %>% left_join(playClean, by = "PlayKey")
+injuryPlay_play <- subset(injuryPlay_play, select = -c(PlayerKey.x, GameID.x, PlayerKey.y, GameID.y, PlayKey))
+
+# Data prep for features dependent on  game
+injuryPlay_game <- injury %>% filter(PlayKey == "") %>% left_join(playClean, by = "GameID")
+injuryPlay_game <- distinct(injuryPlay_game, GameID, .keep_all = TRUE)
+injuryPlay_game$PlayType <- NA
+injuryPlay_game <- subset(injuryPlay_game, select = -c(PlayerKey.x, PlayKey.x, PlayerKey.y, PlayKey.y, GameID))
+
+injuryPlay <- rbind(injuryPlay_play, injuryPlay_game)
+
+injuryPlayPlt <- injuryPlay %>% subset(select = -c(FieldType, StadiumType))
+```
+
+### Graphical Analysis
+
+#### Injuries by Surface
+
+```{r}
+injuryPlayPlt %>% 
+  ggplot() +
+  geom_bar(aes(x = Surface), alpha = .5) + 
+  coord_flip() +
+  labs(y = "Injuries")
+```
+
+#### Injuries by Position
+
+```{r}
+injuryPlayPlt %>% 
+  ggplot() +
+  geom_bar(aes(x = RosterPosition, fill = Surface), alpha = .8) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "Position", y = "Injuries")
+```
+
+#### Injuries by Play Type
+
+```{r}
+injuryPlayPlt %>% 
+  ggplot() +
+  geom_bar(aes(x = PlayType, fill = Surface), alpha = .8) + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = "PlayType", y = "Injuries")
+```
+
+
+#### Weather and Temperature
+
+```{r}
+injuryPlayPlt %>% group_by(Weather) %>% summarise(Observations = n())
+
+injuryPlayPlt %>% group_by(Weather,Surface) %>% summarise(Observations = n())
+
+injuryPlayPlt %>% filter(Weather!= "Other") %>%
+  ggplot() +
+  geom_boxplot(aes(x = Surface, y = Temperature, fill = Surface), alpha = .8)
+```
+
+
+
+### Statistical Analysis
+
+#### Game Level Analysis
+
+###### Preliminary game level regression analysis allows us to get a general feel for what might be contributing to a higher risk of injury within our predictor variables. We see that Temperature and Synthetic Field type appear to be significant. While the NFL already has information suggesting Synthetic field types increase injury. Temperature will be further explored in subsequent analysis.
+
+```{r, warning=FALSE}
+playCleanInjuryGame = distinct(playClean, GameID, .keep_all = TRUE)
+playCleanInjuryGame$PlayType = NULL
+playCleanInjuryGame = playCleanInjuryGame %>% left_join(injury, by = "GameID")
+playCleanInjuryGame$injury = ifelse(is.na(playCleanInjuryGame$DM_M1), 0, 1)
+
+# Ensure the factor level reference is largest value (QB)
+playCleanInjuryGame <- within(playCleanInjuryGame, RosterPosition <- relevel(RosterPosition, ref = 6))
+
+model = glm(injury ~ RosterPosition + Weather + Temperature + FieldType, data = playCleanInjuryGame, family = binomial("logit"))
+summary(model)
+```
+
+#### Play Level Analysis
+
+###### Preliminary play level regression allows us to get a general feel for what might be contributing to a higher risk of injury within our predictor variables on a play-to-play basis. We see that occurence of injury on Punt play types appear to be significantly different from that of Rush and Pass play types. 
+
+```{r, warning=FALSE}
+# Play level analysis
+playCleanInjury = playClean %>% left_join(injury, by = "PlayKey")
+
+playCleanInjury$injury = ifelse(is.na(playCleanInjury$DM_M1), 0, 1)
+playCleanInjury$PlayType <- as.factor(playCleanInjury$PlayType)
+
+# Ensure the factor level reference is largest or smallest value to avoid missing significant factors in RosterPosition & PlayType
+playCleanInjury <- within(playCleanInjury, RosterPosition <- relevel(RosterPosition, ref = 3))
+playCleanInjury <- within(playCleanInjury, PlayType <- relevel(PlayType, ref = 6))
+
+model = glm(injury ~ RosterPosition + PlayType + Temperature + FieldType, data = playCleanInjury, family = binomial)
+summary(model)
+```
+
+###### Exploring Play Type in greateer detail we perform a Tukey test to see the difference in proportion of injuries sustained between each play type. Our adjusted p-values indicate that the Kickoff play type yields a higher risk of injury than Rush and Pass at alpha = .10 level of significance. Additionally Punt play type yields a higher risk of injury than Rush, Pass, Extra Point and Field Goal play types.
+
+```{r}
+# Perform Tukey test to determine which play types are significantly different from one another
+fit <- aov(playCleanInjury$injury ~ playCleanInjury$PlayType)
+tukey = TukeyHSD(fit, conf.level = .90)
+
+tukey
+par(mar=c(5,7,3,2))
+plot(tukey, las=1, cex.axis=0.6)
+```
+
+
+
+
+
+
+\newpage
+## Player Movement
+
+###### The PlayerTrackData.csv file contains several point-in-time measures of each player at every tenth of a second throughout the duration of a play. Based on this information, custom player movement metrics were created to capture circumstances during each play that may lead to a higher risk of injury.
+
+``` {r}
+# Create subset of data containing lagged values of speed and direction
+# These lagged values are used below to calculate acceleration and direction change
+playerNew = player %>% 
+  subset(select = -c(time,event,x,y,o)) %>%
+  group_by(PlayKey) %>%
+  mutate(dirLag = lag(dir, n = 1, default = NA)) %>%
+  mutate(spdLag = lag(s, n = 1, default = NA)) %>%
+  na.omit()
+```
+
+### Player Movement Metrics
+
+#### Max Speed and Total Distance
+```{r}
+playerNewSpdDist <- playerNew %>% group_by(PlayKey) %>% summarise(maxSpd = max(s), totDist = sum(dis))
+```
+
+#### Acceleration and Deceleration
+```{r}
+playerNewTemp <- playerNew
+playerNewTemp$spdChng <- playerNewTemp$s - playerNewTemp$spdLag
+playerNewTemp <- playerNewTemp %>% group_by(PlayKey) %>% summarise(maxAccel = max(spdChng), maxDecel = min(spdChng))
+```
+
+#### Change of Direction
+```{r}
+# Define function to calculate the difference of two angles
+# Ensure that correct direction is used (i.e. angle_diff(350,10) != 340)
+angle_diff <- function(angle1, angle2) {
+  a = min(angle1, angle2)
+  b = max(angle1, angle2)
+  z = a - b
+  
+  if (abs(z) > 180)
+    output_value = ((z + 180) %% (360 - 180))
+  else
+    output_value = abs(z)
+  return(output_value)
+}
+```
+
+```{r}
+# select only rows where player is at top 80% speed for the given play
+playerNew80 <- playerNew %>%
+  group_by(PlayKey) %>% 
+  arrange(PlayKey, desc(s)) %>% 
+  filter(s > quantile(s, .8))
+# calculate the directional change for each play in the subset
+playerNew80$dirChng <- mapply(angle_diff, playerNew80$dirLag, playerNew80$dir)
+# find the max directional change in this subset
+playerNewTemp80 <- playerNew80 %>% group_by(PlayKey) %>% summarise(maxdirChng80 = max(dirChng))
+
+# select only rows where player is at top 90% speed for the given play
+playerNew90 <- playerNew %>%
+  group_by(PlayKey) %>% 
+  arrange(PlayKey, desc(s)) %>% 
+  filter(s > quantile(s, .9))
+# calculate the directional change for each play in the subset
+playerNew90$dirChng <- mapply(angle_diff, playerNew90$dirLag, playerNew90$dir)
+# find the max directional change in this subset
+playerNewTemp90 <- playerNew90 %>% group_by(PlayKey) %>% summarise(maxdirChng90 = max(dirChng))
+
+# select only rows where player is at top 95% speed for the given play
+playerNew95 <- playerNew %>%
+  group_by(PlayKey) %>% 
+  arrange(PlayKey, desc(s)) %>% 
+  filter(s > quantile(s, .95))
+# calculate the directional change for each play in the subset
+playerNew95$dirChng <- mapply(angle_diff, playerNew95$dirLag, playerNew95$dir)
+# find the max directional change in this subset
+playerNewTemp95 <- playerNew95 %>% group_by(PlayKey) %>% summarise(maxdirChng95 = max(dirChng))
+```
+
+```{r, message=FALSE}
+# Join all custom metrics
+playerNewFinal = playerNewSpdDist %>% 
+        inner_join(playerNewTemp, on = "PlayKey") %>% 
+        inner_join(playerNewTemp80,  on = "PlayKey") %>%
+        inner_join(playerNewTemp90,  on = "PlayKey") %>%
+        inner_join(playerNewTemp95,  on = "PlayKey")
+```
+
+```{r}
+# Explore relationship between movement metrics
+corrplot(cor(subset(playerNewFinal, select = -c(PlayKey))), order = "hclust")
+```
+
+``` {r, message=FALSE, warning= FALSE}
+# Join Play Attributes with Player Movement Attributes and finally with injury attributes
+PlayCleanPlayerNew <- inner_join(playClean, playerNewFinal, by = "PlayKey")
+PlayCleanPlayerNewInjury <- PlayCleanPlayerNew %>% left_join(injury, by = "PlayKey")
+PlayCleanPlayerNewInjury$injury <- ifelse(is.na(PlayCleanPlayerNewInjury$DM_M1), 0, 1)
+PlayCleanPlayerNewInjury$PlayType = as.factor(PlayCleanPlayerNewInjury$PlayType)
+```
+
+### Player Movement by Surface
+
+###### We now want to explore if there are differences in player movement metrics between natural and synthetic playing surfaces
+
+###### We see from the results that several Player Movement metrics are significantly different between Natural and Synthetic surfaces. Max Speed, Acceleration and Deceleration are all significantly higher on synthetic surfaces while each of the three direction change Player Movement metrics are significantly lower.
+
+```{r}
+# Two sample T-tests
+t.test(maxSpd ~ FieldType, data = PlayCleanPlayerNewInjury)
+t.test(totDist ~ FieldType, data = PlayCleanPlayerNewInjury)
+t.test(maxAccel ~ FieldType, data = PlayCleanPlayerNewInjury)
+t.test(maxDecel ~ FieldType, data = PlayCleanPlayerNewInjury)
+t.test(maxdirChng80 ~ FieldType, data = PlayCleanPlayerNewInjury)
+t.test(maxdirChng90 ~ FieldType, data = PlayCleanPlayerNewInjury)
+t.test(maxdirChng95 ~ FieldType, data = PlayCleanPlayerNewInjury)
+```
+
+
+
+
+
+
+
+
+\newpage
+## Risk Factors + Player Movement
+
+### Feature Selection Methods
+``` {r}
+dmyPlayCleanPlayerNewInjury = NULL
+features = NULL
+
+# Create Dummies
+dmyPlayCleanPlayerNewInjury <- PlayCleanPlayerNewInjury %>% select(PlayKey, RosterPosition, FieldType, Weather, PlayType)
+dmyPlayCleanPlayerNewInjury$PlayKey = str_replace(dmyPlayCleanPlayerNewInjury$PlayKey,"-", "")
+dmyPlayCleanPlayerNewInjury$PlayKey = str_replace(dmyPlayCleanPlayerNewInjury$PlayKey,"-", "")
+dmyPlayCleanPlayerNewInjury$PlayKey <- as.numeric(dmyPlayCleanPlayerNewInjury$PlayKey)
+
+dummies <- dummyVars(" ~ .", data = dmyPlayCleanPlayerNewInjury)
+dmyPlayCleanPlayerNewInjury <- data.frame(predict(dummies, newdata = dmyPlayCleanPlayerNewInjury))
+
+# Join categorical dummies with Numeric variables
+features <- PlayCleanPlayerNewInjury %>% 
+  select(injury, PlayKey, Temperature, maxSpd, totDist, maxAccel, maxDecel, maxdirChng80, maxdirChng90, maxdirChng95)
+features$PlayKey <- str_replace(features$PlayKey,"-", "")
+features$PlayKey <- str_replace(features$PlayKey,"-", "")
+features$PlayKey <- as.numeric(features$PlayKey)
+
+# Final DF of all features in numeric form (dummy or standard)
+features = features %>% inner_join(dmyPlayCleanPlayerNewInjury, by = "PlayKey") %>% subset(select = -c(PlayKey))
+```
+
+### Regression Modeling Methods
+
+#### Injury Risks by Player Movements Metrics
+
+###### Regressing injury on Player Movement metrics individually, we see that players' maximum speed and maximum acceleration appear to increase risk of injury at alpha =.05 level of significance. Further, at alpha = .15 level of significance, players' total distance traveled and maximum deceleration appear to increase risk of injury on any given play.
+
+``` {r}
+model = glm(injury ~ maxSpd, data = PlayCleanPlayerNewInjury, family = binomial)
+summary(model)
+
+model = glm(injury ~ totDist, data = PlayCleanPlayerNewInjury, family = binomial)
+summary(model)
+
+model = glm(injury ~ maxAccel, data = PlayCleanPlayerNewInjury, family = binomial)
+summary(model)
+
+model = glm(injury ~ maxDecel, data = PlayCleanPlayerNewInjury, family = binomial)
+summary(model)
+```
+
+#### Injury Risk Interaction with Player Movement
+```{r}
+# Review correlation matrix of all numeric features before building logistic models, adressing colinearity concerns where necessary 
+cormat <- cor(features)
+```
+
+###### Examining direct interactions between each Player Movement metric and Field Type, we find that there are no significant interaction terms present (maxAccel included as example below). This suggests that under the conditions of the current model and features, we have no evidence of increased risk of injury between synthetic and natural surfaces due to changes in any of the Player Movement metrics that were constructed. 
+
+``` {r, warning = FALSE}
+model = glm(injury ~  RosterPosition + PlayType + Temperature + Weather + maxAccel*FieldType, data = PlayCleanPlayerNewInjury, family = binomial)
+summary(model)
+```
+
+###### Removing direct interaction terms, totDist and maxdirChng90 (due to colinearity concerns) we see that several Player Movement metrics and Risk Factors appear to increase the risk of injury when other variables in the model are held constant.
+
+###### Temperature, the possibility of Rain or Snow, Maximum Speed, and Sythetic field type coefficients are all found to be significant at alpha = .10 level of significance. 
+``` {r, warning = FALSE}
+### Re-level here
+
+# Ensure the factor level reference is largest/smallest value to avoid missing significant factors in RosterPosition & PlayType
+PlayCleanPlayerNewInjury <- within(PlayCleanPlayerNewInjury, RosterPosition <- relevel(RosterPosition, ref = 3))
+PlayCleanPlayerNewInjury <- within(PlayCleanPlayerNewInjury, PlayType <- relevel(PlayType, ref = 4))
+
+model = glm(injury ~  RosterPosition + PlayType + Temperature + Weather + maxSpd + maxAccel + maxDecel + maxdirChng80 + maxdirChng95 + FieldType, data = PlayCleanPlayerNewInjury, family = binomial)
+summary(model)
+```
+
+#### Weather and Player Movement Interaction
+
+###### Including an interaction term between Weather and Max Speed we see there is a significatn relationship present. This provides evidence that as the Maximum Speed of a player on any given play increases their injury risk is significantly higher in Rainy or Snowy conditions compared to conditions with no Rain or Snow.
+ 
+``` {r, warning = FALSE}
+model = glm(injury ~  maxSpd*Weather, data = PlayCleanPlayerNewInjury, family = binomial)
+summary(model)
+```
+
+
